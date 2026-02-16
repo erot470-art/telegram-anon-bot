@@ -12,7 +12,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Токен из переменных окружения Railway
+# Токен из переменных окружения
 TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
 
@@ -25,6 +25,7 @@ if ADMIN_ID == 0:
 DB_NAME = "messages.db"
 
 def init_db():
+    """Создаёт таблицу для хранения сообщений."""
     conn = sqlite3.connect(DB_NAME)
     c = conn.cursor()
     c.execute('''CREATE TABLE IF NOT EXISTS messages
@@ -41,6 +42,7 @@ def init_db():
     conn.close()
 
 def save_message(user_id, username, first_name, date, message_type, text, file_id, admin_message_id):
+    """Сохраняет информацию о сообщении."""
     conn = sqlite3.connect(DB_NAME)
     c = conn.cursor()
     c.execute('''INSERT INTO messages 
@@ -51,6 +53,7 @@ def save_message(user_id, username, first_name, date, message_type, text, file_i
     conn.close()
 
 def get_user_by_admin_message(admin_message_id):
+    """Получает данные пользователя по ID сообщения админа."""
     conn = sqlite3.connect(DB_NAME)
     c = conn.cursor()
     c.execute('''SELECT user_id, username, first_name, date, text FROM messages WHERE admin_message_id = ?''',
@@ -60,71 +63,84 @@ def get_user_by_admin_message(admin_message_id):
     return row
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработчик команды /start."""
     await update.message.reply_text(
         "👋 Привет! Я бот для анонимных сообщений.\n"
-        "Ты можешь отправить мне любое сообщение (текст, фото, видео), "
-        "и оно будет анонимно передано администратору."
+        "Отправь мне любое сообщение, и оно анонимно уйдёт администратору."
     )
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработчик всех сообщений."""
     user = update.effective_user
-    msg = update.message
+    message = update.message
     
-    if not msg:
+    if not message:
         return
 
-    # --- Сообщения от администратора ---
+    # Сообщения от администратора
     if user.id == ADMIN_ID:
-        if msg.reply_to_message:
-            replied_msg = msg.reply_to_message
-            admin_message_id = replied_msg.message_id
+        if message.reply_to_message:
+            admin_message_id = message.reply_to_message.message_id
             user_info = get_user_by_admin_message(admin_message_id)
 
             if user_info:
                 user_id = user_info[0]
                 try:
-                    await msg.copy(chat_id=user_id)
-                    await msg.reply_text("✅ Ответ отправлен!")
+                    await message.copy(chat_id=user_id)
+                    await message.reply_text("✅ Ответ отправлен!")
                 except Exception as e:
-                    await msg.reply_text("❌ Не удалось отправить ответ")
+                    await message.reply_text("❌ Не удалось отправить ответ")
+                    logger.error(f"Reply error: {e}")
             else:
-                await msg.reply_text("❌ Автор не найден")
+                await message.reply_text("❌ Автор не найден")
         return
 
-    # --- Сообщения от пользователей ---
-    date = datetime.now()
-    message_type = "text"
-    text = msg.text or msg.caption or ""
-    file_id = None
-
-    if msg.photo:
-        message_type = "photo"
-        file_id = msg.photo[-1].file_id
-    elif msg.video:
-        message_type = "video"
-        file_id = msg.video.file_id
-    elif msg.document:
-        message_type = "document"
-        file_id = msg.document.file_id
-    elif msg.voice:
-        message_type = "voice"
-        file_id = msg.voice.file_id
-
+    # Сообщения от пользователей
     try:
-        copied_message = await msg.copy(chat_id=ADMIN_ID, caption=msg.caption)
+        # Определяем тип сообщения
+        message_type = "text"
+        text = message.text or message.caption or ""
+        file_id = None
+
+        if message.photo:
+            message_type = "photo"
+            file_id = message.photo[-1].file_id
+        elif message.video:
+            message_type = "video"
+            file_id = message.video.file_id
+        elif message.document:
+            message_type = "document"
+            file_id = message.document.file_id
+        elif message.voice:
+            message_type = "voice"
+            file_id = message.voice.file_id
+        elif message.audio:
+            message_type = "audio"
+            file_id = message.audio.file_id
+        elif message.sticker:
+            message_type = "sticker"
+            file_id = message.sticker.file_id
+        elif message.animation:
+            message_type = "animation"
+            file_id = message.animation.file_id
+
+        # Копируем сообщение админу
+        copied_message = await message.copy(chat_id=ADMIN_ID, caption=message.caption)
         admin_message_id = copied_message.message_id
 
+        # Сохраняем в БД
         save_message(
             user_id=user.id,
             username=user.username,
             first_name=user.first_name,
-            date=date,
+            date=datetime.now(),
             message_type=message_type,
             text=text,
             file_id=file_id,
             admin_message_id=admin_message_id
         )
 
+        # Добавляем кнопку
         keyboard = [[InlineKeyboardButton("👤 Показать автора", callback_data=f"show_{admin_message_id}")]]
         reply_markup = InlineKeyboardMarkup(keyboard)
         await context.bot.edit_message_reply_markup(
@@ -133,12 +149,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=reply_markup
         )
 
-        await msg.reply_text("✅ Сообщение доставлено админу!")
+        await message.reply_text("✅ Сообщение доставлено админу!")
+
     except Exception as e:
-        await msg.reply_text("❌ Ошибка при отправке")
-        logger.error(f"Error: {e}")
+        await message.reply_text("❌ Ошибка при отправке")
+        logger.error(f"Message error: {e}")
 
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработчик нажатий на кнопки."""
     query = update.callback_query
     await query.answer()
 
@@ -153,41 +171,55 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if user_info:
             user_id, username, first_name, date, text = user_info
             
+            # Форматируем дату
             if isinstance(date, datetime):
                 date_str = date.strftime('%d.%m.%Y %H:%M')
             else:
                 date_str = str(date)
             
             username_text = f"@{username}" if username else "нет"
+            
             info = (
-                f"📨 **Автор сообщения**\n"
+                f"📨 **Информация об авторе**\n"
                 f"👤 Имя: {first_name}\n"
                 f"🆔 ID: {user_id}\n"
                 f"📱 Юзернейм: {username_text}\n"
                 f"📅 Дата: {date_str}\n"
                 f"💬 Текст: {text}"
             )
-            await context.bot.send_message(chat_id=ADMIN_ID, text=info)
+            
+            await context.bot.send_message(
+                chat_id=ADMIN_ID, 
+                text=info,
+                parse_mode='Markdown'
+            )
+            
+            # Удаляем кнопку
             await query.edit_message_reply_markup(reply_markup=None)
         else:
-            await query.edit_message_text(text="❌ Не найдено")
+            await query.edit_message_text(text="❌ Автор не найден")
 
 def main():
+    """Запуск бота."""
+    # Инициализация БД
     init_db()
     
-    try:
-        application = Application.builder().token(TOKEN).build()
-        
-        application.add_handler(CommandHandler("start", start))
-        application.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, handle_message))
-        application.add_handler(CallbackQueryHandler(button_callback))
-        
-        print("✅ Бот запущен! Администратор ID:", ADMIN_ID)
-        print("🚀 Railway порт:", os.getenv("PORT", "не указан"))
-        
-        application.run_polling()
-    except Exception as e:
-        print(f"❌ Ошибка при запуске: {e}")
+    # Создание приложения
+    application = Application.builder().token(TOKEN).build()
+    
+    # Добавление обработчиков
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, handle_message))
+    application.add_handler(CallbackQueryHandler(button_callback))
+    
+    print("✅ Бот запущен!")
+    print(f"👤 Администратор ID: {ADMIN_ID}")
+    
+    # Запуск бота
+    application.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception as e:
+        print(f"❌ Ошибка при запуске: {e}")
